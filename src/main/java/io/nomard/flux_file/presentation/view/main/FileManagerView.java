@@ -25,6 +25,7 @@ public class FileManagerView {
     private ProgressIndicator progressIndicator;
     private Button backButton;
     private Button refreshButton;
+    private CheckBox showHiddenCheckBox;
 
     @Autowired
     public FileManagerView(FileManagerController controller) {
@@ -53,6 +54,7 @@ public class FileManagerView {
         Button compressButton = new Button("📦 Compress");
         Button terminalButton = new Button("⌨ Terminal");
         Button cloudButton = new Button("☁ Cloud");
+        showHiddenCheckBox = new CheckBox("Show hidden");
 
         toolBar.getItems().addAll(
                 backButton,
@@ -63,7 +65,9 @@ public class FileManagerView {
                 deleteButton,
                 compressButton,
                 terminalButton,
-                cloudButton
+                cloudButton,
+                new Separator(),
+                showHiddenCheckBox
         );
 
         // Path and Search Bar
@@ -162,5 +166,9 @@ public class FileManagerView {
 
     public BorderPane getView() {
         return root;
+    }
+
+    public CheckBox getShowHiddenCheckBox() {
+        return showHiddenCheckBox;
     }
 }

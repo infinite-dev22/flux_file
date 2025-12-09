@@ -53,12 +53,14 @@ public class PreferencesService {
     }
 
     public void setDefaultApplication(String extension, String application) {
-        preferences.setProperty("default.app." + extension, application);
+        String keyExt = normalizeExt(extension);
+        preferences.setProperty("default.app." + keyExt, application);
         savePreferences().subscribe();
     }
 
     public String getDefaultApplication(String extension) {
-        return preferences.getProperty("default.app." + extension);
+        String keyExt = normalizeExt(extension);
+        return preferences.getProperty("default.app." + keyExt);
     }
 
     public Map<String, String> getAllDefaultApplications() {
@@ -71,5 +73,29 @@ public class PreferencesService {
             }
         });
         return defaults;
+    }
+
+    // -------------------------
+    // Hidden files preference
+    // -------------------------
+
+    private static final String PREF_SHOW_HIDDEN = "ui.showHidden";
+
+    public boolean isShowHidden() {
+        String v = preferences.getProperty(PREF_SHOW_HIDDEN, "false");
+        return Boolean.parseBoolean(v);
+    }
+
+    public void setShowHidden(boolean show) {
+        preferences.setProperty(PREF_SHOW_HIDDEN, Boolean.toString(show));
+        // Fire and forget persistence
+        savePreferences().subscribe();
+    }
+
+    private String normalizeExt(String ext) {
+        if (ext == null) return "";
+        String e = ext.trim();
+        if (e.startsWith(".")) e = e.substring(1);
+        return e.toLowerCase();
     }
 }

@@ -28,6 +28,7 @@ import java.nio.file.Paths;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
+import java.time.Duration;
 import java.util.*;
 import java.util.stream.Collectors;
 
@@ -49,6 +50,10 @@ public class FileManagerController {
     private Disposable watchDisposable;
     private Path clipboard;
     private boolean isCutOperation = false;
+    // Suppress refreshes from the directory watcher while long operations run
+    private volatile boolean suppressWatchRefresh = false;
+    // Preference: show hidden files/folders
+    private boolean showHidden = false;
 
     public FileManagerController(RemoteBrowserView remoteBrowserView, RemoteBrowserController remoteBrowserController, PreferencesService preferencesService, SystemService systemService, FileWatchService fileWatchService, FileService fileService) {
         this.remoteBrowserView = remoteBrowserView;
@@ -67,6 +72,17 @@ public class FileManagerController {
         view.getPathField().setText(currentPath.toString());
 
         view.getFileTable().setItems(fileItems);
+
+        // Initialize hidden toggle from preferences
+        this.showHidden = preferencesService.isShowHidden();
+        if (view.getShowHiddenCheckBox() != null) {
+            view.getShowHiddenCheckBox().setSelected(showHidden);
+            view.getShowHiddenCheckBox().selectedProperty().addListener((obs, oldV, newV) -> {
+                this.showHidden = Boolean.TRUE.equals(newV);
+                preferencesService.setShowHidden(this.showHidden);
+                refreshDirectory();
+            });
+        }
 
         loadDirectory(currentPath);
     }
@@ -226,7 +242,7 @@ public class FileManagerController {
     }
 
     private void openFile(FileItem item) {
-        String extension = item.getExtension();
+        String extension = item.getExtension() == null ? "" : item.getExtension().toLowerCase(java.util.Locale.ROOT);
         String defaultApp = preferencesService.getDefaultApplication(extension);
 
         if (defaultApp != null && !defaultApp.isEmpty()) {
@@ -267,7 +283,7 @@ public class FileManagerController {
             return;
         }
 
-        String extension = item.getExtension();
+        String extension = item.getExtension() == null ? "" : item.getExtension().toLowerCase(java.util.Locale.ROOT);
         if (extension.isEmpty()) {
             showError("Error", "File has no extension");
             return;
@@ -411,20 +427,44 @@ public class FileManagerController {
         Path finalTarget = target;
 
         if (isCutOperation) {
+            // Show feedback for long running move operation
+            view.getProgressIndicator().setVisible(true);
+            view.getStatusLabel().setText("Moving…");
+            suppressWatchRefresh = true;
             fileService.moveFile(clipboard, finalTarget)
                     .doOnSuccess(v -> Platform.runLater(() -> {
                         clipboard = null;
                         isCutOperation = false;
+                        view.getProgressIndicator().setVisible(false);
+                        view.getStatusLabel().setText("Move completed");
+                        suppressWatchRefresh = false;
                         refreshDirectory();
                     }))
-                    .doOnError(e -> Platform.runLater(() ->
-                            showError("Move Failed", e.getMessage())))
+                    .doOnError(e -> Platform.runLater(() -> {
+                        view.getProgressIndicator().setVisible(false);
+                        view.getStatusLabel().setText("Move failed");
+                        suppressWatchRefresh = false;
+                        showError("Move Failed", e.getMessage());
+                    }))
                     .subscribe();
         } else {
+            // Show feedback for long running copy operation
+            view.getProgressIndicator().setVisible(true);
+            view.getStatusLabel().setText("Copying…");
+            suppressWatchRefresh = true;
             fileService.copyFile(clipboard, finalTarget)
-                    .doOnSuccess(v -> Platform.runLater(this::refreshDirectory))
-                    .doOnError(e -> Platform.runLater(() ->
-                            showError("Copy Failed", e.getMessage())))
+                    .doOnSuccess(v -> Platform.runLater(() -> {
+                        view.getProgressIndicator().setVisible(false);
+                        view.getStatusLabel().setText("Copy completed");
+                        suppressWatchRefresh = false;
+                        refreshDirectory();
+                    }))
+                    .doOnError(e -> Platform.runLater(() -> {
+                        view.getProgressIndicator().setVisible(false);
+                        view.getStatusLabel().setText("Copy failed");
+                        suppressWatchRefresh = false;
+                        showError("Copy Failed", e.getMessage());
+                    }))
                     .subscribe();
         }
     }
@@ -482,10 +522,12 @@ public class FileManagerController {
         }
 
         fileService.listFiles(directory)
-                .doOnNext(fileItem -> Platform.runLater(() -> fileItems.add(fileItem)))
-                .doOnComplete(() -> Platform.runLater(() -> {
+                .collectList()
+                .map(list -> filterHidden(list))
+                .doOnSuccess(list -> Platform.runLater(() -> {
+                    fileItems.setAll(list);
                     view.getProgressIndicator().setVisible(false);
-                    view.getStatusLabel().setText(fileItems.size() + " items");
+                    view.getStatusLabel().setText(list.size() + " items");
                     currentPath = directory;
                     view.getPathField().setText(directory.toString());
                     startWatching(directory);
@@ -496,9 +538,6 @@ public class FileManagerController {
                     showError("Error", "Failed to load directory: " + error.getMessage());
                 }))
                 .subscribe();
-
-        // Start watching new directory
-        startWatching(directory);
     }
 
     private void startWatching(Path directory) {
@@ -511,13 +550,18 @@ public class FileManagerController {
 
         Disposable disposable = fileWatchService.watchDirectory(directory)
                 .subscribe(
-                        event -> Platform.runLater(() -> {
-                            log.debug("File change detected: {} - {}", event.kind(), event.context());
-                            refreshDirectory();
-                        }),
-                        error -> {
-                            log.error("Error watching directory: {}", directory, error);
-                            Platform.runLater(() -> showError("Watch Error", error.getMessage()));
+                        event -> {
+                            if (suppressWatchRefresh) {
+                                return;
+                            }
+                            Platform.runLater(() -> {
+                                log.debug("File change detected, refreshing directory: {}", directory);
+                                refreshDirectory();
+                            });
+                        },
+                        t -> {
+                            log.error("Error watching directory: {}", directory);
+                            Platform.runLater(() -> showError("Watch Error", String.valueOf(t)));
                         },
                         () -> log.debug("Watch completed for: {}", directory)
                 );
@@ -580,12 +624,48 @@ public class FileManagerController {
         view.getStatusLabel().setText("Searching...");
 
         fileService.searchFiles(currentPath, searchTerm)
-                .doOnNext(fileItem -> Platform.runLater(() -> fileItems.add(fileItem)))
-                .doOnComplete(() -> Platform.runLater(() -> {
+                .collectList()
+                .map(list -> filterHidden(list))
+                .doOnSuccess(list -> Platform.runLater(() -> {
+                    fileItems.setAll(list);
                     view.getProgressIndicator().setVisible(false);
-                    view.getStatusLabel().setText("Found " + fileItems.size() + " items");
+                    view.getStatusLabel().setText("Found " + list.size() + " items");
+                }))
+                .doOnError(error -> Platform.runLater(() -> {
+                    view.getProgressIndicator().setVisible(false);
+                    view.getStatusLabel().setText("Search failed");
+                    showError("Search Error", error.getMessage());
                 }))
                 .subscribe();
+    }
+
+    private java.util.List<FileItem> filterHidden(java.util.List<FileItem> items) {
+        if (showHidden) return items;
+        java.util.List<FileItem> out = new java.util.ArrayList<>(items.size());
+        for (FileItem fi : items) {
+            try {
+                if (!isPathHidden(fi.path(), fi.name())) {
+                    out.add(fi);
+                }
+            } catch (Exception e) {
+                // If we cannot determine hidden-ness, show it to avoid hiding legitimate files
+                out.add(fi);
+            }
+        }
+        return out;
+    }
+
+    private boolean isPathHidden(Path path, String name) {
+        try {
+            if (Files.isHidden(path)) {
+                return true;
+            }
+        } catch (IOException ignored) {
+            // Fall through to name-based check
+        }
+
+        // Treat dotfiles as hidden on Unix-like systems; often also desired on Windows
+        return name != null && name.startsWith(".");
     }
 
     public void handleDelete() {
@@ -600,11 +680,37 @@ public class FileManagerController {
         Optional<ButtonType> result = alert.showAndWait();
         if (result.isPresent() && result.get() == ButtonType.OK) {
             List<FileItem> itemsToDelete = new ArrayList<>(selected);
+            // Show feedback while deleting
+            view.getProgressIndicator().setVisible(true);
+            view.getStatusLabel().setText("Deleting " + itemsToDelete.size() + " item(s)…");
+            suppressWatchRefresh = true;
+
+            java.util.concurrent.atomic.AtomicInteger completed = new java.util.concurrent.atomic.AtomicInteger(0);
+            java.util.concurrent.atomic.AtomicInteger failed = new java.util.concurrent.atomic.AtomicInteger(0);
+
+            Runnable onFinish = () -> {
+                if (completed.get() + failed.get() == itemsToDelete.size()) {
+                    view.getProgressIndicator().setVisible(false);
+                    String message = failed.get() == 0
+                            ? "Deleted " + completed.get() + " item(s)"
+                            : "Deleted " + completed.get() + ", failed " + failed.get();
+                    view.getStatusLabel().setText(message);
+                    suppressWatchRefresh = false;
+                    refreshDirectory();
+                }
+            };
+
             for (FileItem item : itemsToDelete) {
                 fileService.deleteFile(item.path())
-                        .doOnSuccess(v -> Platform.runLater(this::refreshDirectory))
-                        .doOnError(e -> Platform.runLater(() ->
-                                showError("Delete Failed", e.getMessage())))
+                        .doOnSuccess(v -> Platform.runLater(() -> {
+                            completed.incrementAndGet();
+                            onFinish.run();
+                        }))
+                        .doOnError(e -> Platform.runLater(() -> {
+                            failed.incrementAndGet();
+                            showError("Delete Failed", e.getMessage());
+                            onFinish.run();
+                        }))
                         .subscribe();
             }
         }
@@ -651,13 +757,23 @@ public class FileManagerController {
                     .collect(Collectors.toList());
 
             String finalName = name;
+            // Show feedback for long running compression
+            view.getProgressIndicator().setVisible(true);
+            view.getStatusLabel().setText("Compressing…");
+            suppressWatchRefresh = true;
             fileService.compressFiles(files, zipFile)
                     .doOnSuccess(v -> Platform.runLater(() -> {
-                        refreshDirectory();
+                        view.getProgressIndicator().setVisible(false);
                         view.getStatusLabel().setText("Compressed to " + finalName);
+                        suppressWatchRefresh = false;
+                        refreshDirectory();
                     }))
-                    .doOnError(e -> Platform.runLater(() ->
-                            showError("Compression Failed", e.getMessage())))
+                    .doOnError(e -> Platform.runLater(() -> {
+                        view.getProgressIndicator().setVisible(false);
+                        view.getStatusLabel().setText("Compression failed");
+                        suppressWatchRefresh = false;
+                        showError("Compression Failed", e.getMessage());
+                    }))
                     .subscribe();
         });
     }

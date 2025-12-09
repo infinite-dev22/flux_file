@@ -91,27 +91,217 @@ public class SystemService {
 
     public Mono<List<String>> getInstalledApplications() {
         return Mono.fromCallable(() -> {
-            List<String> apps = new ArrayList<>();
             String os = System.getProperty("os.name").toLowerCase();
-
             if (os.contains("win")) {
-                apps.add("notepad");
-                apps.add("notepad++");
-                apps.add("code"); // VS Code
-                apps.add("explorer");
+                return enumerateWindowsApplications();
             } else if (os.contains("mac")) {
-                apps.add("TextEdit");
-                apps.add("Visual Studio Code");
-                apps.add("Sublime Text");
+                return enumerateMacApplications();
             } else {
-                apps.add("gedit");
-                apps.add("nano");
-                apps.add("vim");
-                apps.add("code");
+                return enumerateLinuxApplications();
             }
-
-            return apps;
         }).subscribeOn(ioScheduler);
+    }
+
+    // --------------------------
+    // Application enumeration
+    // --------------------------
+
+    private List<String> enumerateMacApplications() {
+        List<String> apps = new ArrayList<>();
+        // Common application folders
+        addMacAppsFromDir(apps, java.nio.file.Paths.get("/Applications"));
+        addMacAppsFromDir(apps, java.nio.file.Paths.get(System.getProperty("user.home"), "Applications"));
+        addMacAppsFromDir(apps, java.nio.file.Paths.get("/System/Applications"));
+
+        // Ensure some well-known ones even if not found
+        addIfAbsent(apps, "TextEdit");
+        addIfAbsent(apps, "Preview");
+        addIfAbsent(apps, "Safari");
+        addIfAbsent(apps, "Visual Studio Code");
+        addIfAbsent(apps, "Sublime Text");
+
+        apps.sort(String::compareToIgnoreCase);
+        return dedup(apps);
+    }
+
+    private void addMacAppsFromDir(List<String> out, java.nio.file.Path dir) {
+        try {
+            if (java.nio.file.Files.isDirectory(dir)) {
+                try (java.nio.file.DirectoryStream<java.nio.file.Path> stream = java.nio.file.Files.newDirectoryStream(dir, "*.app")) {
+                    for (java.nio.file.Path p : stream) {
+                        String name = p.getFileName().toString();
+                        if (name.toLowerCase().endsWith(".app")) {
+                            name = name.substring(0, name.length() - 4);
+                        }
+                        addIfAbsent(out, name);
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
+    private List<String> enumerateLinuxApplications() {
+        List<String> apps = new ArrayList<>();
+        // Scan .desktop files and extract first Exec token
+        java.nio.file.Path sysApps = java.nio.file.Paths.get("/usr/share/applications");
+        java.nio.file.Path userApps = java.nio.file.Paths.get(System.getProperty("user.home"), ".local/share/applications");
+        addLinuxAppsFromDir(apps, sysApps);
+        addLinuxAppsFromDir(apps, userApps);
+
+        // Also include common editors present on PATH
+        addIfCommandAvailable(apps, "xdg-open");
+        addIfCommandAvailable(apps, "gedit");
+        addIfCommandAvailable(apps, "nano");
+        addIfCommandAvailable(apps, "vim");
+        addIfCommandAvailable(apps, "code");
+        addIfCommandAvailable(apps, "kate");
+        addIfCommandAvailable(apps, "mousepad");
+        addIfCommandAvailable(apps, "vlc");
+        addIfCommandAvailable(apps, "eog");
+        addIfCommandAvailable(apps, "eom");
+        addIfCommandAvailable(apps, "xdg-email");
+
+        List<String> deduped = dedup(apps);
+        deduped.sort(String::compareToIgnoreCase);
+        return deduped;
+    }
+
+    private void addLinuxAppsFromDir(List<String> out, java.nio.file.Path dir) {
+        try {
+            if (java.nio.file.Files.isDirectory(dir)) {
+                try (java.nio.file.DirectoryStream<java.nio.file.Path> stream = java.nio.file.Files.newDirectoryStream(dir, "*.desktop")) {
+                    for (java.nio.file.Path desktopFile : stream) {
+                        String exec = extractExecFromDesktopFile(desktopFile);
+                        if (exec != null && !exec.isBlank()) {
+                            // First token is command
+                            String cmd = exec.trim().split("\\s+")[0];
+                            // Remove quotes around path if any
+                            if ((cmd.startsWith("\"") && cmd.endsWith("\"")) || (cmd.startsWith("'") && cmd.endsWith("'"))) {
+                                cmd = cmd.substring(1, cmd.length() - 1);
+                            }
+                            // If command is absolute path, prefer basename
+                            java.nio.file.Path p = java.nio.file.Paths.get(cmd);
+                            String candidateName = p.getFileName() != null ? p.getFileName().toString() : cmd;
+                            boolean onPath = isCommandAvailable(candidateName);
+                            boolean isAbsExec = java.nio.file.Files.isExecutable(p);
+                            if (onPath) {
+                                addIfAbsent(out, candidateName);
+                            } else if (isAbsExec) {
+                                // keep absolute path so we can execute directly
+                                addIfAbsent(out, p.toString());
+                            }
+                        }
+                    }
+                }
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
+    private String extractExecFromDesktopFile(java.nio.file.Path desktopFile) {
+        try {
+            java.util.List<String> lines = java.nio.file.Files.readAllLines(desktopFile);
+            for (String line : lines) {
+                String trimmed = line.trim();
+                if (trimmed.startsWith("Exec=")) {
+                    String exec = trimmed.substring(5).trim();
+                    // remove field codes like %f, %F, %U etc
+                    exec = exec.replaceAll("%[fFuUdDnNickvm]", "").trim();
+                    return exec;
+                }
+            }
+        } catch (Exception ignored) {
+        }
+        return null;
+    }
+
+    private List<String> enumerateWindowsApplications() {
+        List<String> apps = new ArrayList<>();
+
+        // Always useful commands if on PATH
+        addIfCommandAvailable(apps, "notepad");
+        addIfCommandAvailable(apps, "code");
+        addIfCommandAvailable(apps, "write");
+        addIfCommandAvailable(apps, "mspaint");
+        addIfCommandAvailable(apps, "wordpad");
+        addIfCommandAvailable(apps, "wmplayer");
+
+        // Common installed apps by default locations
+        String programFiles = System.getenv("ProgramFiles");
+        String programFilesX86 = System.getenv("ProgramFiles(x86)");
+        String localAppData = System.getenv("LocalAppData");
+
+        addIfExists(apps, join(programFiles, "Notepad++", "notepad++.exe"));
+        addIfExists(apps, join(programFilesX86, "Notepad++", "notepad++.exe"));
+
+        addIfExists(apps, join(programFiles, "Microsoft VS Code", "Code.exe"));
+        addIfExists(apps, join(programFilesX86, "Microsoft VS Code", "Code.exe"));
+        addIfExists(apps, join(localAppData, "Programs", "Microsoft VS Code", "Code.exe"));
+
+        addIfExists(apps, join(programFiles, "Sublime Text", "sublime_text.exe"));
+        addIfExists(apps, join(programFilesX86, "Sublime Text", "sublime_text.exe"));
+
+        addIfExists(apps, join(programFiles, "VideoLAN", "VLC", "vlc.exe"));
+        addIfExists(apps, join(programFilesX86, "VideoLAN", "VLC", "vlc.exe"));
+
+        addIfExists(apps, join(programFiles, "Google", "Chrome", "Application", "chrome.exe"));
+        addIfExists(apps, join(programFilesX86, "Google", "Chrome", "Application", "chrome.exe"));
+
+        addIfExists(apps, join(programFiles, "Mozilla Firefox", "firefox.exe"));
+        addIfExists(apps, join(programFilesX86, "Mozilla Firefox", "firefox.exe"));
+
+        addIfExists(apps, join(programFiles, "Microsoft", "Edge", "Application", "msedge.exe"));
+        addIfExists(apps, join(programFilesX86, "Microsoft", "Edge", "Application", "msedge.exe"));
+
+        addIfExists(apps, join(programFiles, "7-Zip", "7zFM.exe"));
+        addIfExists(apps, join(programFilesX86, "7-Zip", "7zFM.exe"));
+
+        addIfExists(apps, join(programFiles, "WinRAR", "WinRAR.exe"));
+        addIfExists(apps, join(programFilesX86, "WinRAR", "WinRAR.exe"));
+
+        // Deduplicate and sort; prefer names on PATH first, then full paths
+        List<String> deduped = dedup(apps);
+        deduped.sort(String::compareToIgnoreCase);
+        return deduped;
+    }
+
+    private String join(String base, String... parts) {
+        if (base == null || base.isBlank()) return null;
+        java.nio.file.Path p = java.nio.file.Paths.get(base, parts);
+        return p.toString();
+    }
+
+    private void addIfExists(List<String> out, String pathStr) {
+        if (pathStr == null) return;
+        try {
+            java.nio.file.Path p = java.nio.file.Paths.get(pathStr);
+            if (java.nio.file.Files.exists(p)) {
+                addIfAbsent(out, p.toString());
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void addIfCommandAvailable(List<String> out, String command) {
+        try {
+            if (isCommandAvailable(command)) {
+                addIfAbsent(out, command);
+            }
+        } catch (Exception ignored) {
+        }
+    }
+
+    private void addIfAbsent(List<String> out, String value) {
+        if (value == null || value.isBlank()) return;
+        if (!out.contains(value)) {
+            out.add(value);
+        }
+    }
+
+    private List<String> dedup(List<String> in) {
+        java.util.LinkedHashSet<String> set = new java.util.LinkedHashSet<>(in);
+        return new java.util.ArrayList<>(set);
     }
 
     public Mono<Void> shareFile(Path file) {

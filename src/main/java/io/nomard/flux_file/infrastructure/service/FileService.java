@@ -141,11 +141,32 @@ public class FileService {
     public Mono<Void> openFile(Path path) {
         return Mono.fromRunnable(() -> {
             try {
+                // First try the Desktop API if supported
                 if (Desktop.isDesktopSupported()) {
-                    Desktop.getDesktop().open(path.toFile());
+                    Desktop desktop = Desktop.getDesktop();
+                    if (desktop.isSupported(Desktop.Action.OPEN)) {
+                        try {
+                            desktop.open(path.toFile());
+                            return;
+                        } catch (Exception ignored) {
+                            // Fallback to OS-specific command below
+                        }
+                    }
                 }
+
+                String os = System.getProperty("os.name").toLowerCase();
+                ProcessBuilder pb;
+                if (os.contains("win")) {
+                    // Use shell to invoke the associated application
+                    pb = new ProcessBuilder("cmd", "/c", "start", "", path.toString());
+                } else if (os.contains("mac")) {
+                    pb = new ProcessBuilder("open", path.toString());
+                } else {
+                    pb = new ProcessBuilder("xdg-open", path.toString());
+                }
+                pb.start();
             } catch (IOException e) {
-                throw new RuntimeException("Failed to open file", e);
+                throw new RuntimeException("Failed to open file: " + path, e);
             }
         }).subscribeOn(ioScheduler).then();
     }
@@ -153,10 +174,24 @@ public class FileService {
     public Mono<Void> openWith(Path path, String application) {
         return Mono.fromRunnable(() -> {
             try {
-                ProcessBuilder pb = new ProcessBuilder(application, path.toString());
+                String os = System.getProperty("os.name").toLowerCase();
+                ProcessBuilder pb;
+
+                if (os.contains("win")) {
+                    // On Windows, directly launching the application executable works best
+                    // application can be an executable name on PATH or a full path
+                    pb = new ProcessBuilder(application, path.toString());
+                } else if (os.contains("mac")) {
+                    // On macOS, use `open -a <Application>` to target an app by name
+                    pb = new ProcessBuilder("open", "-a", application, path.toString());
+                } else {
+                    // On Linux/Unix, call the application directly with the file as argument
+                    pb = new ProcessBuilder(application, path.toString());
+                }
+
                 pb.start();
             } catch (IOException e) {
-                throw new RuntimeException("Failed to open with application", e);
+                throw new RuntimeException("Failed to open with application '" + application + "': " + e.getMessage(), e);
             }
         }).subscribeOn(ioScheduler).then();
     }
