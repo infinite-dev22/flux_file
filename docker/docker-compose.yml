@@ -1,0 +1,10 @@
+version: '3.8'
+services:
+  reactive-file-manager:
+    build: .
+    image: reactive-file-manager:latest
+    container_name: reactive-file-manager
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./:/app

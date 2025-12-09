@@ -1,0 +1,20 @@
+name: Test
+
+on:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Set up JDK
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '21'
+      - name: Cache Gradle
+        uses: gradle/actions/setup-gradle@v3
+      - name: Run tests
+        run: ./gradlew test --stacktrace
