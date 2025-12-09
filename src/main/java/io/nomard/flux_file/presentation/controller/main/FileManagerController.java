@@ -580,7 +580,6 @@ public class FileManagerController {
         view.getStatusLabel().setText("Searching...");
 
         fileService.searchFiles(currentPath, searchTerm)
-                .flatMap(fileService::createFileItem)
                 .doOnNext(fileItem -> Platform.runLater(() -> fileItems.add(fileItem)))
                 .doOnComplete(() -> Platform.runLater(() -> {
                     view.getProgressIndicator().setVisible(false);
