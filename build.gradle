@@ -1,0 +1,234 @@
+// ============================================================================
+// build.gradle - Fixed Configuration for JavaFX + Spring Boot
+// ============================================================================
+
+plugins {
+    id 'java'
+    id 'application'
+    id 'org.springframework.boot' version '4.0.0'
+    id 'io.spring.dependency-management' version '1.1.7'
+    id "org.openjfx.javafxplugin" version "0.1.0"
+    id 'org.beryx.jlink' version '3.0.1'
+}
+
+group = 'io.nomard'
+version = '0.0.1-SNAPSHOT'
+description = 'Reactive File Manager'
+
+java {
+    toolchain {
+        languageVersion = JavaLanguageVersion.of(25)
+    }
+}
+
+javafx {
+    version = '25.0.1'
+    modules = ['javafx.controls', 'javafx.swing', 'javafx.fxml', 'javafx.graphics', 'javafx.base']
+}
+
+application {
+    mainClass = 'io.nomard.flux_file.FluxFileApplication'
+}
+
+configurations {
+    compileOnly {
+        extendsFrom annotationProcessor
+    }
+}
+
+repositories {
+    mavenCentral()
+}
+
+//ext {
+//    // Version management
+//    httpMime = '4.5.14'
+//    httpCore = '4.4.16'
+//    gson = '2.11.0'
+//    thumbnailator = '0.4.20'
+//    webpImageIo = '0.2.2'
+//    atlantaFx = '2.0.1'
+//    ikonli = '12.3.1'
+//    cssFx = '11.5.1'
+//}
+
+dependencies {
+    // ========================================
+    // Spring Boot (exclude Tomcat, add Reactor)
+    // ========================================
+    implementation('org.springframework.boot:spring-boot-starter-webflux') {
+        exclude group: 'org.springframework.boot', module: 'spring-boot-starter-tomcat'
+    }
+    developmentOnly 'org.springframework.boot:spring-boot-devtools'
+
+    // ========================================
+    // Cloud Storage APIs
+    // ========================================
+    implementation 'com.google.api-client:google-api-client:2.2.0'
+    implementation 'com.google.oauth-client:google-oauth-client-jetty:1.34.1'
+    implementation 'com.google.apis:google-api-services-drive:v3-rev20220815-2.0.0'
+    implementation 'com.microsoft.graph:microsoft-graph:5.77.0'
+    implementation 'com.azure:azure-identity:1.12.2'
+    implementation 'com.dropbox.core:dropbox-core-sdk:5.4.5'
+    implementation 'com.jcraft:jsch:0.1.55'
+
+    // ========================================
+    // HTTP & Network
+    // ========================================
+    implementation "org.apache.httpcomponents:httpmime:${http_mime}"
+    implementation "org.apache.httpcomponents:httpcore:${http_core}"
+
+    // ========================================
+    // Serialization
+    // ========================================
+    implementation "com.google.code.gson:gson:${gson}"
+
+    // ========================================
+    // Image Processing
+    // ========================================
+    implementation "net.coobird:thumbnailator:${thumbnailator}"
+    implementation "com.gitee.jmash:webp-imageio:${webp_imag_io}"
+
+    // ========================================
+    // JavaFX UI Libraries
+    // ========================================
+    implementation "io.github.mkpaz:atlantafx-base:${atlanta_fx}"
+    implementation "org.kordamp.ikonli:ikonli-javafx:${ikonli}"
+    implementation "org.kordamp.ikonli:ikonli-core:${ikonli}"
+    implementation "org.kordamp.ikonli:ikonli-fontawesome5-pack:${ikonli}"
+    implementation "org.kordamp.ikonli:ikonli-feather-pack:${ikonli}"
+    implementation "fr.brouillard.oss:cssfx:${css_fx}"
+
+    // ========================================
+    // Lombok
+    // ========================================
+    compileOnly 'org.projectlombok:lombok'
+    annotationProcessor 'org.projectlombok:lombok'
+
+    // ========================================
+    // Testing
+    // ========================================
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+    testImplementation 'io.projectreactor:reactor-test'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+// ============================================================================
+// Run Configuration - CRITICAL FIX
+// ============================================================================
+
+run {
+    // Add JavaFX modules to JVM args
+    jvmArgs = [
+            '--module-path', classpath.asPath,
+            '--add-modules', 'javafx.controls,javafx.fxml,javafx.swing,javafx.graphics,javafx.base',
+            '--add-opens', 'javafx.graphics/com.sun.javafx.application=ALL-UNNAMED',
+            '--add-opens', 'javafx.controls/com.sun.javafx.scene.control.behavior=ALL-UNNAMED',
+            '--add-opens', 'javafx.controls/com.sun.javafx.scene.control=ALL-UNNAMED',
+            '--add-opens', 'javafx.base/com.sun.javafx.binding=ALL-UNNAMED',
+            '--add-opens', 'javafx.base/com.sun.javafx.event=ALL-UNNAMED',
+            '--add-opens', 'javafx.graphics/com.sun.javafx.stage=ALL-UNNAMED'
+    ]
+}
+
+// ============================================================================
+// Task Configurations
+// ============================================================================
+
+tasks.named('test') {
+    useJUnitPlatform()
+
+    jvmArgs = [
+            '--add-opens', 'javafx.graphics/com.sun.javafx.application=ALL-UNNAMED',
+            '--add-opens', 'javafx.graphics/com.sun.glass.ui=ALL-UNNAMED'
+    ]
+
+    testLogging {
+        events "passed", "skipped", "failed"
+        exceptionFormat "full"
+    }
+}
+
+// ============================================================================
+// JAR Configuration
+// ============================================================================
+
+tasks.named('jar') {
+    enabled = false
+}
+
+tasks.named('bootJar') {
+    archiveFileName = "${project.name}-${project.version}.jar"
+
+    manifest {
+        attributes(
+                'Main-Class': 'io.nomard.flux_file.FluxFileApplication',
+                'Implementation-Title': project.name,
+                'Implementation-Version': project.version
+        )
+    }
+}
+
+// ============================================================================
+// jpackage Configuration
+// ============================================================================
+
+jlink {
+    options = [
+            '--strip-debug',
+            '--compress', '2',
+            '--no-header-files',
+            '--no-man-pages'
+    ]
+
+    addExtraDependencies('javafx')
+
+    launcher {
+        name = 'FluxFile'
+        jvmArgs = [
+                '--add-opens', 'javafx.graphics/com.sun.javafx.application=ALL-UNNAMED'
+        ]
+    }
+
+    jpackage {
+        imageName = 'FluxFile'
+        installerName = 'FluxFile'
+
+        if (org.gradle.internal.os.OperatingSystem.current().isWindows()) {
+            installerType = 'msi'
+            imageOptions = ['--icon', 'src/main/resources/icons/app/icon.ico']
+            installerOptions = [
+                    '--win-per-user-install',
+                    '--win-dir-chooser',
+                    '--win-menu',
+                    '--win-shortcut'
+            ]
+        } else if (org.gradle.internal.os.OperatingSystem.current().isLinux()) {
+            installerType = 'deb'
+            imageOptions = ['--icon', 'src/main/resources/icons/app/icon.png']
+        } else if (org.gradle.internal.os.OperatingSystem.current().isMacOsX()) {
+            installerType = 'dmg'
+            imageOptions = ['--icon', 'src/main/resources/icons/app/icon.icns']
+        }
+    }
+}
+
+// ============================================================================
+// gradle.properties (create this file)
+// ============================================================================
+
+/*
+Create a file named 'gradle.properties' in the root directory with:
+
+org.gradle.jvmargs=-Xmx2048m
+org.gradle.parallel=true
+org.gradle.caching=true
+*/
+
+// ============================================================================
+// settings.gradle (update this file)
+// ============================================================================
+
+/*
+rootProject.name = 'flux_file'
+*/
