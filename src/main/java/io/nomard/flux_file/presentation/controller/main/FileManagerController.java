@@ -17,6 +17,7 @@ import javafx.scene.input.KeyCode;
 import javafx.scene.input.MouseButton;
 import javafx.scene.layout.GridPane;
 import lombok.Setter;
+import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Component;
 import reactor.core.Disposable;
 
@@ -27,12 +28,11 @@ import java.nio.file.Paths;
 import java.nio.file.attribute.BasicFileAttributes;
 import java.time.ZoneId;
 import java.time.format.DateTimeFormatter;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.Optional;
+import java.util.*;
 import java.util.stream.Collectors;
 
 @Component
+@Slf4j
 @Setter
 public class FileManagerController {
 
@@ -43,7 +43,7 @@ public class FileManagerController {
     private final PreferencesService preferencesService;
     private final RemoteBrowserController remoteBrowserController;
     private final RemoteBrowserView remoteBrowserView;
-
+    private final Map<Path, Disposable> watcherDisposables = new HashMap<>();
     private FileManagerView view;
     private Path currentPath;
     private Disposable watchDisposable;
@@ -468,6 +468,11 @@ public class FileManagerController {
     }
 
     private void loadDirectory(Path directory) {
+        // Dispose old watcher before creating new one
+        disposeCurrentWatcher();
+
+        currentPath = directory;
+
         fileItems.clear();
         view.getProgressIndicator().setVisible(true);
         view.getStatusLabel().setText("Loading...");
@@ -491,14 +496,62 @@ public class FileManagerController {
                     showError("Error", "Failed to load directory: " + error.getMessage());
                 }))
                 .subscribe();
+
+        // Start watching new directory
+        startWatching(directory);
     }
 
     private void startWatching(Path directory) {
-        watchDisposable = fileWatchService.watchDirectory(directory)
-                .subscribe(event -> Platform.runLater(() -> {
-                    view.getStatusLabel().setText("Directory changed - " + event.kind().name());
-                    refreshDirectory();
-                }));
+        if (directory == null) return;
+
+        // Dispose any existing watcher for this path
+        disposeWatcher(directory);
+
+        log.debug("Starting to watch directory: {}", directory);
+
+        Disposable disposable = fileWatchService.watchDirectory(directory)
+                .subscribe(
+                        event -> Platform.runLater(() -> {
+                            log.debug("File change detected: {} - {}", event.kind(), event.context());
+                            refreshDirectory();
+                        }),
+                        error -> {
+                            log.error("Error watching directory: {}", directory, error);
+                            Platform.runLater(() -> showError("Watch Error", error.getMessage()));
+                        },
+                        () -> log.debug("Watch completed for: {}", directory)
+                );
+
+        watcherDisposables.put(directory, disposable);
+    }
+
+    private void disposeCurrentWatcher() {
+        if (currentPath != null) {
+            disposeWatcher(currentPath);
+        }
+    }
+
+    private void disposeWatcher(Path path) {
+        Disposable disposable = watcherDisposables.remove(path);
+        if (disposable != null && !disposable.isDisposed()) {
+            log.debug("Disposing watcher for: {}", path);
+            disposable.dispose();
+        }
+
+        // Also tell the service to stop
+        fileWatchService.stopWatching(path);
+    }
+
+    public void cleanup() {
+        log.info("Cleaning up controller, disposing all watchers");
+
+        watcherDisposables.values().forEach(disposable -> {
+            if (!disposable.isDisposed()) {
+                disposable.dispose();
+            }
+        });
+
+        watcherDisposables.clear();
     }
 
     private void navigateToDirectory(Path path) {
